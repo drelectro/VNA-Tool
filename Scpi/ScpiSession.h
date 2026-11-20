@@ -51,9 +51,18 @@ public:
     // still reports finished() with `cancelled` set.
     quint64 enqueue(const ScpiTransaction& transaction);
 
+    // A query whose exact reply is known (*IDN? and the line it returned at
+    // connect). After a timeout the session sends it and discards everything
+    // up to that reply, which puts the stream back in step however late the
+    // lost reply turns up. Thread-safe.
+    void setResyncProbe(const QByteArray& query, const QByteArray& expectedReply);
+
 public slots:
     void open();
     void close();
+    // Sends one last command (best effort, briefly waiting for it to be
+    // taken) and then closes. For putting the instrument back as it was found.
+    void closeWith(const QByteArray& finalCommand);
 
 signals:
     void stateChanged(ScpiSessionState state, const QString& detail);
@@ -78,6 +87,10 @@ private:
                      const ScpiTransaction* txn, qint64 elapsedUs = 0);
     void failAll(const QString& reason);
 
+    // Called after a timeout. Returns false if the instrument did not answer
+    // the probe either, i.e. the connection is no use any more.
+    bool resync(const ScpiTransaction* txn);
+
     ScpiTransport* _transport = nullptr;
     ScpiEndpoint   _endpoint;
 
@@ -86,4 +99,8 @@ private:
     QAtomicInt    _nextId{1};
     bool          _processing = false;
     int           _consecutiveTimeouts = 0;
+
+    mutable QMutex _probeMutex;
+    QByteArray     _probeQuery;
+    QByteArray     _probeReply;
 };

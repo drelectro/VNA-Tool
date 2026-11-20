@@ -222,8 +222,21 @@ void benchDevice(Bench& b)
     b.checkEq("sweep has all four parameters", int(last.mask), 0x0F);
     b.checkEq("sweep points", last.points(), 401);
 
+    int busySignals = 0;
+    bool sawBusy = false;
+    QObject::connect(&dev, &VnaDevice::busyChanged, [&] { ++busySignals; sawBusy |= dev.isBusy(); });
+    b.check("not busy before a setting", !dev.isBusy());
     dev.setPoints(201);
+    b.check("busy while a setting is unconfirmed", dev.isBusy() && dev.busyNote() == QLatin1String("Points"),
+            dev.busyNote());
     b.check("points read back", waitFor([&] { return dev.stimulus().points == 201; }));
+    b.check("busy clears once confirmed", waitFor([&] { return !dev.isBusy(); }) && sawBusy && busySignals >= 2,
+            QString::number(busySignals));
+    // A superseded setting must not leave the flag stuck on.
+    for (const int n : {210, 220, 230, 201})
+        dev.setPoints(n);
+    b.check("busy clears after coalesced settings",
+            waitFor([&] { return !dev.isBusy() && dev.stimulus().points == 201; }), QString::number(dev.stimulus().points));
     b.check("next sweep has new points", waitFor([&] { return last.points() == 201; }));
 
     messages.clear();
@@ -328,6 +341,46 @@ void benchDevice(Bench& b)
     b.check("console sees the error token",
             !rawResult.ok && rawResult.firstError() == QLatin1String("GATEWAY_UNSUPPORTED_COMMAND"),
             rawResult.firstError());
+
+    // A reply that arrives after its timeout (the instrument busy with a slow
+    // sweep) must not end the connection, must not leave the setting unread,
+    // and must not be taken as the answer to the next query.
+    waitFor([] { return false; }, 300);
+    messages.clear();
+    dev.simWithholdReplies(2);          // the command and its *OPC?
+    dev.setPoints(301);
+    b.check("setting still read back after a late reply",
+            waitFor([&] { return dev.stimulus().points == 301; }), messages.join(" | "));
+    b.check("still connected after a timeout", dev.isReady());
+    b.check("slow confirmation is reported as such, not as a refusal",
+            waitFor([&] { return !messages.filter("slow to confirm").isEmpty(); }) && messages.filter("refused").isEmpty(),
+            messages.join(" | "));
+    rawResult = ScpiResult{};
+    rawId = dev.sendRaw("VNA:ACQ:IFBW?");
+    b.check("next query gets its own answer, not the late one",
+            waitFor([&] { return !rawResult.replies.isEmpty(); }) && rawResult.replies.value(0).text == "10000",
+            QString::fromLatin1(rawResult.replies.value(0).text));
+
+    // Taking over pauses the tablet's sweep; giving it back restarts it.
+    b.check("tablet sweep running before take-over", dev.stimulus().deviceRunning);
+    dev.setTakeOver(true);
+    b.check("take-over pauses the tablet sweep", waitFor([&] { return !dev.stimulus().deviceRunning; }));
+    const int beforeTakeOver = sweeps;
+    dev.single();
+    b.check("sweeps still arrive with the tablet paused", waitFor([&] { return sweeps > beforeTakeOver; }));
+    dev.setTakeOver(false);
+    b.check("turning take-over off restarts the tablet sweep", waitFor([&] { return dev.stimulus().deviceRunning; }));
+    waitFor([&] { return !dev.isBusy(); });
+
+    // The stimulus presets go in as one transaction.
+    dev.applyPreset(5, 100, 401);
+    b.check("preset to a narrow IF bandwidth",
+            waitFor([&] { return dev.stimulus().power == 5 && dev.stimulus().ifbw == 100 && dev.stimulus().points == 401; }),
+            QString("%1 dBm, %2 Hz, %3").arg(dev.stimulus().power).arg(dev.stimulus().ifbw).arg(dev.stimulus().points));
+    dev.applyPreset(0, 10e3, 201);
+    b.check("preset back to a wide IF bandwidth",
+            waitFor([&] { return dev.stimulus().power == 0 && dev.stimulus().ifbw == 10e3 && dev.stimulus().points == 201; }),
+            QString("%1 dBm, %2 Hz, %3").arg(dev.stimulus().power).arg(dev.stimulus().ifbw).arg(dev.stimulus().points));
 
     dev.disconnectFrom();
     b.check("disconnects", dev.state() == VnaDevice::State::Disconnected);

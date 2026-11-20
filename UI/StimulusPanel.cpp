@@ -164,9 +164,7 @@ void StimulusPanel::applyScenario(int index)
                         .arg(s.power)
                         .arg(Formats::engineering(s.ifbw, QStringLiteral("Hz")))
                         .arg(s.points));
-    _device->setPower(s.power);
-    _device->setIfbw(s.ifbw);
-    _device->setPoints(s.points);
+    _device->applyPreset(s.power, s.ifbw, s.points);
     // The combo then follows the values read back in refresh(): it stays on
     // this preset if all three took, and drops to Custom if one was refused.
 }

@@ -47,11 +47,13 @@ struct ScpiRequest
 {
     QByteArray text;                    // no terminator
     ScpiKind   kind = ScpiKind::Command;
-    int        timeoutMs = 3000;
+    // Queries normally answer in under 100 ms, but not always while a slow
+    // sweep is running; setters use a longer, sweep-dependent figure.
+    int        timeoutMs = 10000;
     QString    tag;                     // lets the sender recognise the reply
 
     ScpiRequest() = default;
-    ScpiRequest(QByteArray t, ScpiKind k, QString tagText = QString(), int timeout = 3000)
+    ScpiRequest(QByteArray t, ScpiKind k, QString tagText = QString(), int timeout = 10000)
         : text(std::move(t)), kind(k), timeoutMs(timeout), tag(std::move(tagText)) {}
 };
 
@@ -59,7 +61,7 @@ inline ScpiRequest scpiCommand(QByteArray text, QString tag = QString())
 {
     return ScpiRequest(std::move(text), ScpiKind::Command, std::move(tag));
 }
-inline ScpiRequest scpiQuery(QByteArray text, QString tag = QString(), int timeoutMs = 3000)
+inline ScpiRequest scpiQuery(QByteArray text, QString tag = QString(), int timeoutMs = 10000)
 {
     return ScpiRequest(std::move(text), ScpiKind::Query, std::move(tag), timeoutMs);
 }

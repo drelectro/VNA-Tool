@@ -2,6 +2,8 @@
 
 #include "ScpiTransport.h"
 
+#include <QAtomicInt>
+
 #include <memory>
 
 class SimVna;
@@ -30,10 +32,18 @@ public:
     // 30-90 ms round trip. Zero in the bench.
     void setLatencyMs(int ms) { _latencyMs = ms; }
 
+    // Fault injection: the replies to the next `count` lines written are held
+    // back (so their reads time out) and delivered ahead of the reply to the
+    // line after them - what the instrument does when a reply is slower than
+    // the caller's timeout. Thread-safe.
+    void withholdNextReplies(int count) { _withhold.storeRelaxed(count); }
+
 private:
     std::unique_ptr<SimVna> _sim;
     QByteArray _rx;
     QByteArray _txPartial;
+    QByteArray _late;
+    QAtomicInt _withhold{0};
     bool _open = false;
     int  _latencyMs = 0;
 };

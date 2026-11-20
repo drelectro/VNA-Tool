@@ -38,7 +38,15 @@ bool ScpiSimTransport::write(const QByteArray& data, QString& err)
     while (ScpiParse::takeLine(_txPartial, line)) {
         if (_latencyMs > 0)
             QThread::msleep(static_cast<unsigned long>(_latencyMs));
-        _rx.append(_sim->execute(line));
+        const QByteArray reply = _sim->execute(line);
+        if (_withhold.loadRelaxed() > 0) {
+            _withhold.fetchAndSubRelaxed(1);
+            _late.append(reply);
+        } else {
+            _rx.append(_late);
+            _late.clear();
+            _rx.append(reply);
+        }
     }
     return true;
 }

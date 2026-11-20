@@ -88,7 +88,7 @@ const QList<ScpiCatalogEntry>& entries()
         {"VNA:ACQuisition:GROups:COUNt?", "Sweeps per group", P::Observed},
         {"VNA:ACQuisition:GROups:PERiod", "Group period", P::Listed},
         {"VNA:ACQuisition:GROups:PERiod?", "Group period; 0,0 observed", P::Observed},
-        {"VNA:ACQuisition:GROups:CONTinuous", "Continuous groups", P::Listed},
+        {"VNA:ACQuisition:GROups:CONTinuous <ON|OFF>", "ON arms a group at once; the query stays OFF and nothing re-arms", P::Observed},
         {"VNA:ACQuisition:GROups:CONTinuous?", "Continuous groups; OFF observed", P::Observed},
         {"VNA:ACQuisition:GROups:INITiate", "Capture the next group of sweeps", P::Observed},
         {"VNA:ACQuisition:GROups:STATus?", "state,groupId,done,total,reason", P::Observed},

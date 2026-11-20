@@ -69,7 +69,20 @@ MainWindow::MainWindow(QWidget* parent)
     _statusSim->hide();
     statusBar()->addWidget(_statusConnection);
     statusBar()->addWidget(_statusSweep, 1);
+    _statusBusy = new QLabel;
+    _statusBusy->setMinimumWidth(250);
+    _statusBusy->setToolTip(tr("What the instrument is doing. Settings can take as long as a sweep to "
+                               "confirm when the sweep is slow."));
+    statusBar()->addPermanentWidget(_statusBusy);
     statusBar()->addPermanentWidget(_statusSim);
+
+    // The sweep progress has no signal of its own, so it is read on a timer.
+    auto* busyTimer = new QTimer(this);
+    busyTimer->setInterval(250);
+    connect(busyTimer, &QTimer::timeout, this, &MainWindow::updateBusy);
+    busyTimer->start();
+    connect(&_device, &VnaDevice::busyChanged, this, &MainWindow::updateBusy);
+    connect(&_device, &VnaDevice::stateChanged, this, &MainWindow::updateBusy);
 
     connect(&_device, &VnaDevice::stateChanged, this, &MainWindow::onDeviceState);
     connect(&_device, &VnaDevice::sweepReady, this, &MainWindow::onSweep);
@@ -194,6 +207,19 @@ void MainWindow::buildMenus()
     }
     _actContinuous->setChecked(true);
     QAction* actSingle = sweep->addAction(tr("&Single"), QKeySequence(Qt::Key_F7), &_device, &VnaDevice::single);
+    sweep->addSeparator();
+    QAction* actTakeOver = sweep->addAction(tr("Take over sweeping (pause the tablet's sweep)"));
+    actTakeOver->setCheckable(true);
+    actTakeOver->setToolTip(tr("While the tablet sweeps on its own, only every second sweep reaches this "
+                               "application. Paused, every sweep does. The tablet's display stops updating "
+                               "until you disconnect or turn this off."));
+    actTakeOver->setChecked(AppSettings::value(QStringLiteral("Sweep/takeOver"), false).toBool());
+    _device.setTakeOver(actTakeOver->isChecked());
+    connect(actTakeOver, &QAction::toggled, this, [this](bool on) {
+        AppSettings::setValue(QStringLiteral("Sweep/takeOver"), on);
+        _device.setTakeOver(on);
+    });
+    sweep->setToolTipsVisible(true);
     sweep->addSeparator();
     sweep->addAction(tr("Restart averaging"), &_device, &VnaDevice::restartAveraging);
     sweep->addAction(tr("Re-read instrument settings"), &_device, &VnaDevice::refreshStimulus);
@@ -359,6 +385,44 @@ void MainWindow::updateStatus()
     if (h.unlocked || h.adcOverload || h.unlevelled)
         sweep += tr("   CHECK INSTRUMENT STATUS");
     _statusSweep->setText(sweep);
+}
+
+void MainWindow::updateBusy()
+{
+    QString text;
+    QColor colour = Theme::Colour::kMuted;
+
+    if (_device.state() == VnaDevice::State::Connecting || _device.state() == VnaDevice::State::Identifying) {
+        text = tr("Connecting...");
+        colour = Theme::Colour::kWarn;
+    } else if (!_device.isReady()) {
+        text = QString();
+    } else if (_device.isBusy()) {
+        // Takes priority over sweep progress: this is what the operator is
+        // waiting on, and why a control has not caught up yet.
+        const QString note = _device.busyNote();
+        text = note.isEmpty() ? tr("Busy") : tr("Busy: applying %1").arg(note.left(40));
+        colour = Theme::Colour::kWarn;
+    } else if (_device.isSweeping() && _device.health().sweepTimeS >= 1.0) {
+        // Only for sweeps slow enough to wonder about. "About", because with
+        // the tablet sweeping the instrument first finishes the sweep it is on.
+        text = tr("Sweeping  %1 s of about %2 s")
+                   .arg(_device.sweepElapsedMs() / 1000.0, 0, 'f', 0)
+                   .arg(_device.health().sweepTimeS, 0, 'f', 0);
+        colour = Theme::Colour::kInfo;
+    } else if (_device.runMode() == VnaDevice::RunMode::Continuous || _device.isSweeping()) {
+        text = tr("Sweeping");
+        colour = Theme::Colour::kOk;
+    } else {
+        text = tr("Idle");
+    }
+
+    const QString shown = text.isEmpty() ? QString() : QStringLiteral("●  ") + text;
+    if (_statusBusy->text() != shown)
+        _statusBusy->setText(shown);
+    const QString style = QStringLiteral("color: %1; padding: 0 8px;").arg(colour.name());
+    if (_statusBusy->styleSheet() != style)
+        _statusBusy->setStyleSheet(style);
 }
 
 void MainWindow::onSweep(const SweepData& sweep)

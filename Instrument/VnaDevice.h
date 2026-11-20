@@ -9,6 +9,7 @@
 
 class QThread;
 class ScpiSession;
+class ScpiSimTransport;
 
 // The instrument as the rest of the application sees it.
 //
@@ -56,8 +57,21 @@ public:
     const Health&     health() const { return _health; }
     int averaging() const { return _avgTarget; }
 
+    // True while a setting or instrument action has been sent and not yet
+    // confirmed. With a slow sweep running that can be many seconds.
+    bool    takeOver() const { return _takeOver; }
+    bool    isBusy() const { return _busyCount > 0; }
+    QString busyNote() const { return _busyNote; }
+    // True while a sweep has been asked for and its data has not arrived.
+    bool    isSweeping() const { return _acqPhase != AcqPhase::Idle; }
+    // Milliseconds since the sweep in progress was started.
+    qint64  sweepElapsedMs() const;
+
     // Simulated round-trip latency per command; 0 for the bench.
     void setSimLatencyMs(int ms) { _simLatencyMs = ms; }
+    // Bench hook, simulator only: the replies to the next `count` lines sent
+    // arrive late, as from an instrument busy with a slow sweep.
+    void simWithholdReplies(int count);
 
 public slots:
     void connectTo(const ScpiEndpoint& endpoint);
@@ -76,6 +90,9 @@ public slots:
     void setCwFrequency(double hz);
     void setDwell(double seconds);
     void setExternalReference(bool external);
+    // Power, IF bandwidth and points together, in the order that keeps the
+    // sweep short while the changes go in.
+    void applyPreset(double powerDbm, double ifbwHz, int points);
     void refreshStimulus();
 
     // --- Acquisition ---
@@ -84,6 +101,18 @@ public slots:
     // Sweeps averaged here, on the PC, as a complex running average.
     void setAveraging(int count);
     void restartAveraging();
+    // Take over sweeping: pause the tablet's own continuous sweep while
+    // connected, so the instrument sweeps on demand for this application.
+    //
+    // WHY: with the tablet sweeping, a sweep capture first waits for the sweep
+    // in progress to end and then records the next one, so only every second
+    // sweep arrives here - 24 s per update at an 11.7 s sweep. Paused, each
+    // capture is one sweep, started at once. The tablet's display stops
+    // updating meanwhile; its sweep is restarted on disconnect or when this is
+    // turned off. Off by default: nothing on the instrument changes unless
+    // the operator asks.
+    void setTakeOver(bool on);
+
     // Which S-parameters are on screen (bit per SParam). Only matters above
     // the fast-transfer point limit, where each one costs a separate query.
     void setNeededMask(quint32 mask);
@@ -105,6 +134,7 @@ signals:
     void stimulusChanged();
     void healthChanged();
     void runModeChanged();
+    void busyChanged();
     void sweepReady(const SweepData& sweep);
     void message(const QString& markup);        // LogWidget markup
     void traffic(const ScpiTrafficRecord& record);
@@ -125,6 +155,7 @@ private:
     void    sendSetting(const QByteArray& command, const QList<QByteArray>& readBack,
                         const QString& key, const QString& what);
     ScpiRequest nextPollQuery();
+    int     settingTimeoutMs() const;
     void    appendAllSettingQueries(ScpiTransaction& txn) const;
 
     void startSweep();
@@ -141,6 +172,7 @@ private:
     ScpiEndpoint _endpoint;
     ScpiSession* _session = nullptr;
     QThread*     _thread = nullptr;
+    ScpiSimTransport* _simTransport = nullptr;  // owned by the session
     State        _state = State::Disconnected;
 
     DeviceInfo _info;
@@ -176,6 +208,15 @@ private:
     int       _avgTarget = 1;
     int       _avgCount = 0;
     SweepData _avgSweep;
+
+    void clearPending();
+    void applyTakeOver();
+
+    bool _takeOver = false;
+    bool _pausedByUs = false;       // we stopped the tablet's sweep and owe it a restart
+
+    int     _busyCount = 0;
+    QString _busyNote;
 
     int _simLatencyMs = 0;
 };

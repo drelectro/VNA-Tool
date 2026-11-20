@@ -43,6 +43,13 @@ ScpiRequest tagged(const QByteArray& query)
     return scpiQuery(query, QString::fromLatin1(query));
 }
 
+// Gives every request in a transaction the same timeout.
+void setTimeouts(ScpiTransaction& txn, int timeoutMs)
+{
+    for (ScpiRequest& r : txn.requests)
+        r.timeoutMs = timeoutMs;
+}
+
 } // namespace
 
 VnaDevice::VnaDevice(QObject* parent)
@@ -84,6 +91,7 @@ void VnaDevice::connectTo(const ScpiEndpoint& endpoint)
     if (endpoint.simulated) {
         auto* sim = new ScpiSimTransport;
         sim->setLatencyMs(_simLatencyMs);
+        _simTransport = sim;
         transport = sim;
     } else {
         transport = new ScpiTcpTransport;
@@ -103,19 +111,45 @@ void VnaDevice::disconnectFrom()
     _pollTimer.stop();
     _idleTimer.stop();
     _acqPhase = AcqPhase::Idle;
-    _pending.clear();
+    clearPending();
 
     if (_session) {
         disconnect(_session, nullptr, this, nullptr);
-        QMetaObject::invokeMethod(_session, "close", Qt::BlockingQueuedConnection);
+        // Leave the tablet sweeping if we were the one who paused it.
+        const QByteArray parting = (_pausedByUs && _state == State::Ready) ? QByteArray("VNA:ACQ:RUN")
+                                                                           : QByteArray();
+        _pausedByUs = false;
+        QMetaObject::invokeMethod(_session, "closeWith", Qt::BlockingQueuedConnection,
+                                  Q_ARG(QByteArray, parting));
         _thread->quit();
         _thread->wait(3000);
         delete _thread;         // the session deletes itself on thread finish
         _thread = nullptr;
         _session = nullptr;
+        _simTransport = nullptr;
     }
     if (_state != State::Disconnected)
         setState(State::Disconnected, QStringLiteral("disconnected"));
+}
+
+void VnaDevice::clearPending()
+{
+    _pending.clear();
+    if (_busyCount != 0) {
+        _busyCount = 0;
+        emit busyChanged();
+    }
+}
+
+qint64 VnaDevice::sweepElapsedMs() const
+{
+    return isSweeping() ? QDateTime::currentMSecsSinceEpoch() - _sweepStartMs : 0;
+}
+
+void VnaDevice::simWithholdReplies(int count)
+{
+    if (_simTransport)
+        _simTransport->withholdNextReplies(count);
 }
 
 void VnaDevice::setState(State s, const QString& detail)
@@ -144,7 +178,8 @@ void VnaDevice::onSessionState(ScpiSessionState state, const QString& detail)
         _pollTimer.stop();
         _idleTimer.stop();
         _acqPhase = AcqPhase::Idle;
-        _pending.clear();
+        clearPending();
+        _pausedByUs = false;    // no way to restart it now; the operator will see it stopped
         emit message(red(QStringLiteral("Connection lost: %1").arg(detail)));
         setState(State::Disconnected, detail);
     }
@@ -156,6 +191,11 @@ quint64 VnaDevice::submit(ScpiTransaction txn, Purpose purpose, const QString& n
         return 0;
     const quint64 id = _session->enqueue(txn);
     _pending.insert(id, Pending{purpose, note});
+    if (purpose == Purpose::Set || purpose == Purpose::Action) {
+        ++_busyCount;
+        _busyNote = note;
+        emit busyChanged();
+    }
     return id;
 }
 
@@ -177,6 +217,12 @@ void VnaDevice::onFinished(quint64 id, const ScpiResult& result)
     const Pending p = it.value();
     _pending.erase(it);
 
+    // Before any early return below: a superseded setting is finished too.
+    if (p.purpose == Purpose::Set || p.purpose == Purpose::Action) {
+        _busyCount = std::max(0, _busyCount - 1);
+        emit busyChanged();
+    }
+
     if (p.purpose == Purpose::User) {
         emit userReply(id, result);
         return;
@@ -197,6 +243,8 @@ void VnaDevice::onFinished(quint64 id, const ScpiResult& result)
             disconnectFrom();
             return;
         }
+        // From here on a timeout can be recovered from exactly.
+        _session->setResyncProbe("*IDN?", result.find(QStringLiteral("*IDN?"))->text);
         applyReplies(result);
         emit infoChanged();
         emit stimulusChanged();
@@ -205,6 +253,7 @@ void VnaDevice::onFinished(quint64 id, const ScpiResult& result)
         emit message(QStringLiteral("Connected to [b]%1 %2[/b], serial %3, firmware %4")
                          .arg(_info.manufacturer, _info.model, _info.serial, _info.firmware));
         _idleTimer.start();
+        applyTakeOver();
         if (_runMode == RunMode::Continuous)
             startSweep();
         break;
@@ -214,7 +263,12 @@ void VnaDevice::onFinished(quint64 id, const ScpiResult& result)
         break;
     case Purpose::Set:
         for (const ScpiReply& r : result.replies) {
-            if (!r.ok && r.tag.isEmpty())
+            if (r.ok || !r.tag.isEmpty())
+                continue;
+            if (r.timedOut)
+                emit message(amber(QStringLiteral("%1: the instrument was slow to confirm; "
+                                                  "showing what it reports now").arg(p.note)));
+            else
                 emit message(red(QStringLiteral("%1 refused: %2").arg(p.note, r.error)));
         }
         applyReplies(result);
@@ -348,6 +402,15 @@ ScpiRequest VnaDevice::nextPollQuery()
 // Stimulus
 // ---------------------------------------------------------------------------
 
+int VnaDevice::settingTimeoutMs() const
+{
+    // While a sweep is running the instrument can take up to about a sweep
+    // time to confirm a setting, and narrow IF bandwidths make sweeps of tens
+    // of seconds or more. The new setting may itself lengthen the sweep, so
+    // the floor is generous too.
+    return std::max(30000, int(_health.sweepTimeS * 3000.0) + 15000);
+}
+
 void VnaDevice::sendSetting(const QByteArray& command, const QList<QByteArray>& readBack,
                             const QString& key, const QString& what)
 {
@@ -359,7 +422,31 @@ void VnaDevice::sendSetting(const QByteArray& command, const QList<QByteArray>& 
     for (const QByteArray& q : readBack)
         txn.add(tagged(q));
     txn.add(tagged("VNA:ACQ:SWE:TIME?"));
+    setTimeouts(txn, settingTimeoutMs());
     submit(txn, Purpose::Set, what);
+}
+
+void VnaDevice::applyPreset(double powerDbm, double ifbwHz, int points)
+{
+    if (!isReady())
+        return;
+    // One transaction, ordered so the sweep is short for as much of it as
+    // possible: each command may wait on the sweep in progress, so widen the
+    // IF bandwidth BEFORE the other changes and narrow it AFTER them.
+    ScpiTransaction txn;
+    txn.coalesceKey = QStringLiteral("preset");
+    const QByteArray ifbw = "VNA:ACQ:IFBW " + fmt(ifbwHz);
+    const bool faster = ifbwHz >= _stim.ifbw;
+    if (faster)
+        txn.add(scpiCommand(ifbw));
+    txn.add(scpiCommand("VNA:ACQ:POINTS " + QByteArray::number(points)));
+    txn.add(scpiCommand("VNA:STIM:LVL " + fmt(powerDbm)));
+    if (!faster)
+        txn.add(scpiCommand(ifbw));
+    for (const char* q : {"VNA:ACQ:IFBW?", "VNA:ACQ:POINTS?", "VNA:STIM:LVL?", "VNA:ACQ:SWE:TIME?"})
+        txn.add(tagged(q));
+    setTimeouts(txn, settingTimeoutMs());
+    submit(txn, Purpose::Set, QStringLiteral("Preset"));
 }
 
 void VnaDevice::setStart(double hz)
@@ -396,6 +483,7 @@ void VnaDevice::setStartStop(double startHz, double stopHz)
     txn.add(tagged("VNA:FREQ:START?"));
     txn.add(tagged("VNA:FREQ:STOP?"));
     txn.add(tagged("VNA:ACQ:SWE:TIME?"));
+    setTimeouts(txn, settingTimeoutMs());
     submit(txn, Purpose::Set, QStringLiteral("Frequency range"));
 }
 
@@ -447,6 +535,7 @@ void VnaDevice::setSweepMode(SweepMode mode)
     }
     appendAllSettingQueries(txn);
     txn.add(tagged("VNA:ACQ:SWE:TIME?"));
+    setTimeouts(txn, settingTimeoutMs());
     submit(txn, Purpose::Set, QStringLiteral("Sweep mode"));
 }
 
@@ -460,6 +549,7 @@ void VnaDevice::setPowerRange(double startDbm, double stopDbm)
     txn.add(scpiCommand("VNA:POW:STOP " + fmt(stopDbm)));
     txn.add(tagged("VNA:POW:START?"));
     txn.add(tagged("VNA:POW:STOP?"));
+    setTimeouts(txn, settingTimeoutMs());
     submit(txn, Purpose::Set, QStringLiteral("Power sweep range"));
 }
 
@@ -504,6 +594,7 @@ void VnaDevice::preset()
     ScpiTransaction txn;
     txn.add(scpiCommand("*RST"));
     appendAllSettingQueries(txn);
+    setTimeouts(txn, settingTimeoutMs());
     submit(txn, Purpose::Action, QStringLiteral("Preset"));
 }
 
@@ -514,6 +605,7 @@ void VnaDevice::setDeviceRunning(bool run)
     ScpiTransaction txn;
     txn.add(scpiCommand(run ? "VNA:ACQ:RUN" : "VNA:ACQ:STOP"));
     txn.add(tagged("VNA:ACQ:RUN?"));
+    setTimeouts(txn, settingTimeoutMs());
     submit(txn, Purpose::Action, run ? QStringLiteral("Instrument acquisition start")
                                      : QStringLiteral("Instrument acquisition stop"));
 }
@@ -554,7 +646,7 @@ quint64 VnaDevice::sendRaw(const QByteArray& line)
     ScpiTransaction txn;
     txn.fromUser = true;
     ScpiRequest req(line, ScpiParse::isQuery(line) ? ScpiKind::Query : ScpiKind::Command);
-    req.timeoutMs = 5000;
+    req.timeoutMs = settingTimeoutMs();
     txn.add(req);
     return submit(txn, Purpose::User);
 }
@@ -620,6 +712,7 @@ void VnaDevice::startSweep()
     if (!_groupCountSet)
         txn.add(scpiCommand("VNA:ACQ:GRO:COUN 1", QStringLiteral("groupcount")));
     txn.add(scpiCommand("VNA:ACQ:GRO:INIT", QStringLiteral("init")));
+    setTimeouts(txn, settingTimeoutMs());
     // Every command costs the instrument about 60 ms, so the status and
     // settings poll rides along only on every fourth sweep.
     if (_sweepsStarted++ % 4 == 0)
@@ -647,6 +740,7 @@ void VnaDevice::startAsciiSweep()
             "come from different sweeps.").arg(_info.maxPoints)));
     }
     _acqPhase = AcqPhase::Fetching;
+    _sweepStartMs = QDateTime::currentMSecsSinceEpoch();
 
     ScpiTransaction txn;
     txn.priority = ScpiPriority::Background;
@@ -708,6 +802,28 @@ void VnaDevice::handleAsciiData(const ScpiResult& result)
     }
 }
 
+void VnaDevice::setTakeOver(bool on)
+{
+    if (_takeOver == on)
+        return;
+    _takeOver = on;
+    applyTakeOver();
+}
+
+void VnaDevice::applyTakeOver()
+{
+    if (!isReady())
+        return;
+    if (_takeOver && _stim.deviceRunning) {
+        _pausedByUs = true;
+        emit message(QStringLiteral("Taking over sweeping: the tablet's own sweep is paused while connected"));
+        setDeviceRunning(false);
+    } else if (!_takeOver && _pausedByUs) {
+        _pausedByUs = false;
+        setDeviceRunning(true);
+    }
+}
+
 void VnaDevice::setNeededMask(quint32 mask)
 {
     _neededMask = (mask & 0x0Fu) ? (mask & 0x0Fu) : 0x0Fu;
@@ -730,7 +846,7 @@ void VnaDevice::waitForGroup(bool first)
     const double sweepMs = _health.sweepTimeS * 1000.0;
     // First look after half a sweep; after that, a fraction of the sweep time.
     const int interval = first ? std::clamp(int(sweepMs * 0.5), 0, 2000)
-                               : std::clamp(int(sweepMs / 8.0), 10, 250);
+                               : std::clamp(int(sweepMs / 8.0), 10, 1000);
     _pollTimer.start(interval);
 }
 

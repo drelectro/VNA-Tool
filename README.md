@@ -43,9 +43,13 @@ These have no SCPI command on the instrument:
 2. Connect the tablet to your network via WiFi or Ethernet.
 3. In VNA Tool: **File → Connect**, enter the tablet's address and that port.
 
-VNStudio must stay running; it is the server. Putting the tablet's own sweep on
-Stop (Instrument panel) makes remote updates faster, because the instrument then
-sweeps on demand instead of waiting for its own sweep to come round.
+VNStudio must stay running; it is the server.
+
+While the tablet sweeps on its own, only every second sweep reaches this
+application, because each capture waits for the sweep in progress to finish.
+**Sweep → Take over sweeping** pauses the tablet's sweep while connected, so the
+instrument sweeps on demand and every sweep arrives. The tablet's display stops
+updating until you disconnect or turn the option off.
 
 ## Building
 

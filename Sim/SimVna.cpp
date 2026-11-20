@@ -205,8 +205,11 @@ QByteArray SimVna::handleQuery(const QByteArray& h, const QByteArray& arg)
     if (headerMatches("VNA:ACQuisition:RUN", h)) return boolean(_st.deviceRunning);
     if (headerMatches("VNA:ACQuisition:SINGLE", h)) return boolean(_single);
     if (headerMatches("VNA:ACQuisition:FREQuency", h)) return num(_st.stop);
-    if (headerMatches("VNA:ACQuisition:SWEep:TIME", h)) return num(_st.points / 2164.0);
-    if (headerMatches("VNA:ACQuisition:SWEep:SPEed", h)) return num(2164.0);
+    // Fitted to the instrument: 401 points take 0.185 s at 10 kHz and 11.7 s
+    // at 100 Hz. Only the reported figure; the simulator still answers at once.
+    const double perPoint = 2.9 / _st.ifbw + 0.00017;
+    if (headerMatches("VNA:ACQuisition:SWEep:TIME", h)) return num(_st.points * perPoint);
+    if (headerMatches("VNA:ACQuisition:SWEep:SPEed", h)) return num(1.0 / perPoint);
     if (headerMatches("VNA:ACQuisition:SWEep:VALID", h)) return boolean(true);
     if (headerMatches("VNA:ACQuisition:RAWRx", h)) return boolean(_rawRx);
     if (headerMatches("VNA:ACQuisition:RAWRx:FRAME", h)) return "NO_DATA\n";

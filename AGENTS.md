@@ -28,13 +28,23 @@ knowledge came from; keep that honest.
 - Values are rejected, not clamped, so every setter reads the value back and the UI
   shows what was read.
 - Each command costs 30–90 ms. Count commands in anything that runs per sweep.
+- A reply can be much later than that while a slow sweep is running. Setting
+  timeouts follow the sweep time (`VnaDevice::settingTimeoutMs`), and after any
+  timeout `ScpiSession` resynchronises on `*IDN?` and discards what arrives
+  before its reply. Never recover from a timeout by just draining input: the
+  late reply would be read as the answer to the next query.
 - Sweeps are fetched as binary sweep groups (`VNA:TRAC:GROups:DATA?`), which give
   all four S-parameters of one sweep. This works only up to 2048 points; above
   that `VnaDevice` falls back to four text queries.
 - After a failed group the instrument serves the previous group's block again.
   `VnaDevice` checks the group id so stale data is never shown as a new sweep.
 - Connecting must not change anything on the instrument. `*RST`, state load and
-  calibration load are sent only when the operator asks.
+  calibration load are sent only when the operator asks. The one standing
+  exception is "Take over sweeping", which the operator switches on: it pauses
+  the tablet's sweep on connect and restarts it on disconnect.
+- With the tablet sweeping, a sweep group waits out the sweep in progress and
+  records the next, so only every second sweep arrives. Take-over
+  (`VNA:ACQ:STOP`) makes each group one on-demand sweep.
 
 ## Architecture rules
 
@@ -76,6 +86,15 @@ A window image can be captured without a person at the keyboard:
 ```
 VNA_Tool --sim --workspace layout.vnaws --show-dock Markers --snapshot out.png
 ```
+
+## Build gotcha
+
+An incremental build has once left an object file compiled against an old
+header: after adding members to `VnaDevice` and `MainWindow`, the app died at
+startup with an access violation at address 0, while the bench (a separate
+target) passed. `cmake --build --preset x64-Debug --clean-first` fixed it. If a
+build crashes at startup straight after a header change, clean-build before
+looking for a bug.
 
 ## Qt gotchas met so far
 

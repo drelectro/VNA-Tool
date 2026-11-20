@@ -65,6 +65,7 @@ private:
     void buildDocks();
     void buildMenus();
     void updateStatus();
+    void updateBusy();
     void log(const QString& markup);
     QString autosavePath() const;
     QString pickSavePath(const QString& title, const QString& filter, const QString& suffix);
@@ -84,6 +85,7 @@ private:
     QLabel* _statusConnection = nullptr;
     QLabel* _statusSweep = nullptr;
     QLabel* _statusSim = nullptr;
+    QLabel* _statusBusy = nullptr;
 
     quint64 _sweepCount = 0;
     QString _snapshotPath;

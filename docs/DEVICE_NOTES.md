@@ -67,9 +67,16 @@ States seen in `GROups:STATus?`: `IDLE`, `ARMED`, `COLLECTING`, `DONE`,
 `ABORTED`, `ERROR`. Reasons seen: `NONE`, `ABORTED`, `CONFIG_CHANGED`.
 
 - With the tablet sweeping, `INITiate` goes to `ARMED` until the sweep in
-  progress finishes, then `COLLECTING` for the next one. Expect one to two
-  sweep times per group. With the tablet's acquisition stopped the group
-  sweeps at once, so remote updates are faster with the tablet on Stop.
+  progress finishes, then `COLLECTING` for the next one. Measured at an 11.7 s
+  sweep: `ARMED` for 9.0 s, `COLLECTING` for 11.3 s, `DONE` at 20.4 s. A loop
+  that re-arms after each group therefore gets **every second sweep**. With the
+  tablet's acquisition stopped (`VNA:ACQ:STOP`) the group sweeps at once; that
+  is what the app's "Take over sweeping" option does.
+- `GROups:CONTinuous ON` does not give a group per sweep. It was accepted, but
+  `CONTinuous?` still answered `OFF`, the group went straight to `ARMED` (so
+  the `INITiate` that followed got `GATEWAY_EXECUTION_ERROR`), and after `DONE`
+  nothing re-armed in the next 30 s. `Bench/ProbeGroups.ps1` repeats the test.
+- `INITiate` while a group is already armed → `GATEWAY_EXECUTION_ERROR`.
 - While `ARMED` or `COLLECTING`, `VNA:TRAC:GROups:DATA?` answers
   `GROUP_NOT_READY`. Queries are still answered in the usual 30–90 ms.
 - Changing a setting during a group aborts it (`ABORTED`). Routine; start
@@ -148,6 +155,16 @@ group, and matching the floats against the four `VNA:TRAC:DATA?` replies.
 Which wave is which has not been worked out.
 
 ## Still to confirm
+
+- **How long a set command takes during a slow sweep.** Reported in use: with a
+  100 Hz IF bandwidth (11.7 s sweep) settings stopped taking and the app
+  dropped the connection. The app then used a fixed 3 s timeout and, after a
+  timeout, only drained input briefly, so a reply arriving later was read as
+  the answer to the next query. Both are fixed (timeouts follow the sweep time;
+  a timeout is followed by an `*IDN?` resync), but the instrument's actual
+  delay has not been measured. To measure: set `VNA:ACQ:IFBW 100`, then time
+  `VNA:STIM:LVL`, `VNA:ACQ:POINTS` and `VNA:ACQ:IFBW` (each followed by
+  `*OPC?`) and a few queries with `Bench/ProbeBlock.ps1 -TimeoutMs 90000`.
 
 - Whether returned data follows the tablet's Correction switch. An open port
   read S11 ≈ 1∠0° across the band, which suggests corrected data.

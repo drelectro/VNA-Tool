@@ -13,12 +13,13 @@ param(
     [string[]]$Setup = @(),
     [Parameter(Mandatory = $true)][string]$Query,
     [Parameter(Mandatory = $true)][string]$OutFile,
-    [string[]]$Cleanup = @()
+    [string[]]$Cleanup = @(),
+    [int]$TimeoutMs = 5000
 )
 
 $client = New-Object System.Net.Sockets.TcpClient
 $client.NoDelay = $true
-$client.ReceiveTimeout = 5000
+$client.ReceiveTimeout = $TimeoutMs
 $client.Connect($Address, $Port)
 $stream = $client.GetStream()
 
@@ -50,9 +51,11 @@ function Read-Exact([int]$count) {
 }
 function Run([string]$line) {
     if ($line -match '^!sleep\s+(\d+)') { Start-Sleep -Milliseconds ([int]$Matches[1]); return }
+    $sw = [Diagnostics.Stopwatch]::StartNew()
     if ($line.EndsWith('?')) {
         Send $line
-        '{0,-36} {1}' -f $line, (Read-Line)
+        $r = Read-Line
+        '{0,-36} [{1,6} ms] {2}' -f $line, $sw.ElapsedMilliseconds, $r
         return
     }
     Send $line
@@ -64,7 +67,7 @@ function Run([string]$line) {
         $notes += $r
     }
     if ($notes.Count -eq 0) { $notes = @('ok') }
-    '{0,-36} {1}' -f $line, ($notes -join ' | ')
+    '{0,-36} [{1,6} ms] {2}' -f $line, $sw.ElapsedMilliseconds, ($notes -join ' | ')
 }
 
 try {

@@ -10,6 +10,9 @@
 namespace {
 constexpr int kConnectTimeoutMs = 5000;
 constexpr int kMaxConsecutiveTimeouts = 3;
+// The instrument can hold a reply back for a whole sweep while it applies a
+// setting, and sweeps run to minutes at narrow IF bandwidths.
+constexpr int kResyncTimeoutMs = 120000;
 
 void registerTypes()
 {
@@ -70,6 +73,54 @@ quint64 ScpiSession::enqueue(const ScpiTransaction& transaction)
     return id;
 }
 
+void ScpiSession::setResyncProbe(const QByteArray& query, const QByteArray& expectedReply)
+{
+    const QMutexLocker lock(&_probeMutex);
+    _probeQuery = query;
+    _probeReply = expectedReply;
+}
+
+bool ScpiSession::resync(const ScpiTransaction* txn)
+{
+    QByteArray query, expected;
+    {
+        const QMutexLocker lock(&_probeMutex);
+        query = _probeQuery;
+        expected = _probeReply;
+    }
+    if (query.isEmpty()) {
+        // Not identified yet: all that can be done is drop what has arrived.
+        _transport->discardInput();
+        return true;
+    }
+
+    // WHY NOT JUST DISCARD INPUT: the reply that timed out is usually not
+    // lost, only late - the instrument was busy with a sweep. Draining for a
+    // moment and carrying on leaves it to arrive later and be read as the
+    // answer to some other query, after which every reply is off by one. The
+    // instrument answers strictly in order, so once the probe's own reply has
+    // been read, everything older has been read and thrown away too.
+    emitTraffic(ScpiTrafficDirection::Info, "resynchronising after a timeout", txn);
+    QString err;
+    if (!_transport->write(query + '\n', err))
+        return false;
+
+    QElapsedTimer timer;
+    timer.start();
+    for (;;) {
+        const int remaining = kResyncTimeoutMs - static_cast<int>(timer.elapsed());
+        if (remaining <= 0)
+            return false;
+        QByteArray data;
+        bool isBlock = false;
+        if (!_transport->readReply(remaining, data, isBlock, err))
+            return false;
+        if (!isBlock && data == expected)
+            return true;
+        emitTraffic(ScpiTrafficDirection::Info, "discarded late reply: " + data.left(80), txn);
+    }
+}
+
 void ScpiSession::open()
 {
     setState(ScpiSessionState::Connecting, _endpoint.displayName());
@@ -92,6 +143,29 @@ void ScpiSession::close()
     failAll(QStringLiteral("session closed"));
     _transport->close();
     setState(ScpiSessionState::Disconnected, QStringLiteral("closed"));
+}
+
+void ScpiSession::closeWith(const QByteArray& finalCommand)
+{
+    if (state() == ScpiSessionState::Ready && _transport->isOpen() && !finalCommand.isEmpty()) {
+        emitTraffic(ScpiTrafficDirection::Tx, finalCommand, nullptr);
+        QString err;
+        if (_transport->write(finalCommand + "\n*OPC?\n", err)) {
+            // Wait for the "1" so the command is known to have been read
+            // before the socket goes, but not for long: the application is
+            // closing, and a slow sweep can hold the reply back.
+            QElapsedTimer timer;
+            timer.start();
+            QByteArray data;
+            bool isBlock = false;
+            while (timer.elapsed() < 3000
+                   && _transport->readReply(3000 - static_cast<int>(timer.elapsed()), data, isBlock, err)) {
+                if (!isBlock && data == "1")
+                    break;
+            }
+        }
+    }
+    close();
 }
 
 void ScpiSession::failAll(const QString& reason)
@@ -187,8 +261,8 @@ ScpiResult ScpiSession::runTransaction(const ScpiTransaction& txn, quint64 id)
         result.replies.append(reply);
         if (!reply.ok)
             result.ok = false;
-        if (reply.timedOut) {
-            // Whatever follows would be read against a misaligned stream.
+        if (reply.timedOut && _consecutiveTimeouts >= kMaxConsecutiveTimeouts) {
+            // The connection is gone; nothing further can be exchanged.
             for (qsizetype i = result.replies.size(); i < txn.requests.size(); ++i) {
                 ScpiReply skipped;
                 skipped.tag = txn.requests[i].tag;
@@ -220,7 +294,7 @@ ScpiReply ScpiSession::runRequest(const ScpiRequest& req, const ScpiTransaction&
     if (!_transport->write(payload, err)) {
         reply.error = err;
         reply.timedOut = true;
-        ++_consecutiveTimeouts;
+        _consecutiveTimeouts = kMaxConsecutiveTimeouts;
         emitTraffic(ScpiTrafficDirection::Error, err.toUtf8(), &txn);
         return reply;
     }
@@ -269,9 +343,15 @@ ScpiReply ScpiSession::runRequest(const ScpiRequest& req, const ScpiTransaction&
     }
 
     if (reply.timedOut) {
-        ++_consecutiveTimeouts;
         emitTraffic(ScpiTrafficDirection::Error, reply.error.toUtf8(), &txn);
-        _transport->discardInput();
+        // A timeout on its own says only that one reply was slow. The link is
+        // judged by whether the instrument answers the resync probe: if it
+        // does, carry on (the rest of this transaction included); if not,
+        // processQueue() drops the connection.
+        if (_transport->isOpen() && resync(&txn))
+            _consecutiveTimeouts = 0;
+        else
+            _consecutiveTimeouts = kMaxConsecutiveTimeouts;
     } else {
         _consecutiveTimeouts = 0;
     }
