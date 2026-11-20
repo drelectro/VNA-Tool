@@ -7,6 +7,8 @@ from another PC. VNStudio does have a SCPI server, but it only covers stimulus
 settings and returning complex S-parameters. This application drives the instrument
 through that server and does everything else itself.
 
+![VNA Tool showing four plots of a live measurement](Resources/VNA_Tool_screenshot.png)
+
 ## What it does
 
 - Live sweeps of all four S-parameters, about 2.7 per second at 401 points.
@@ -38,7 +40,7 @@ These have no SCPI command on the instrument:
 ## Connecting
 
 1. On the tablet, in VNStudio: **System → SCPI**, tick Enable, note the port.
-2. Connect the tablet's Ethernet port to your network.
+2. Connect the tablet to your network via WiFi or Ethernet.
 3. In VNA Tool: **File → Connect**, enter the tablet's address and that port.
 
 VNStudio must stay running; it is the server. Putting the tablet's own sweep on
