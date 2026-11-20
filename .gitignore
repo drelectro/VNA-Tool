@@ -1,0 +1,19 @@
+# --- Build output --------------------------------------------------------
+# CMake writes every configuration under out/, including the deployed Qt
+# runtime.
+out/
+build/
+
+# Visual Studio's local cache and per-user state.
+.vs/
+*.user
+*.suo
+CMakeUserPresets.json
+
+# --- Vendor documentation --------------------------------------------------
+# Harogic's manuals are theirs to distribute, not ours. What the code relies
+# on is written up in docs/DEVICE_NOTES.md.
+Documentation/*.pdf
+
+# --- Local tooling ---------------------------------------------------------
+.claude/

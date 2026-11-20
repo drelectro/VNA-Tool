@@ -1,0 +1,27 @@
+# Normalise line endings in the repository to LF, and let Git check out
+# whatever the platform wants. Without this, the same file committed from
+# different tools shows up as a whole-file diff.
+* text=auto
+
+# Sources and docs are text regardless of what Git's heuristic decides.
+*.cpp    text
+*.h      text
+*.txt    text
+*.md     text
+*.json   text
+*.cmake  text
+*.qrc    text
+*.xml    text
+
+# PowerShell is run by Windows PowerShell as well as pwsh; keep CRLF so it is
+# readable in every editor on the machine that runs it.
+*.ps1    text eol=crlf
+
+# Binary. Wireshark captures especially: they are the evidence base for what
+# the instrument actually does, and a line-ending "fix" would corrupt them
+# silently.
+*.pcapng binary
+*.wvd    binary
+*.pdf    binary
+*.png    binary
+*.ico    binary

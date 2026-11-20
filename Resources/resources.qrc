@@ -1,0 +1,10 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+    <qresource prefix="/Resources">
+        <!-- The .ico rather than a PNG: it carries every size from 16 to 256,
+             and Qt's ICO reader hands all of them to QIcon, so the window, the
+             task bar and Alt-Tab each pick the one they want instead of
+             rescaling a single bitmap. Regenerate with Resources/make_icon.ps1. -->
+        <file>vna.ico</file>
+    </qresource>
+</RCC>

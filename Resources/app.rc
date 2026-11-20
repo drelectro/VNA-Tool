@@ -1,0 +1,13 @@
+// Windows resource script.
+//
+// This is what gives the EXECUTABLE its icon - in Explorer, on the task bar
+// before Qt has started, and in the Alt-Tab list. The Qt resource in
+// resources.qrc is a separate mechanism and only covers windows the
+// application has already created, so both are needed.
+//
+// IDI_ICON1 is the conventional first icon: the Windows shell shows the
+// lowest-numbered icon resource, so this one must keep the lowest id.
+
+#define IDI_ICON1 101
+
+IDI_ICON1 ICON "vna.ico"
